@@ -60,10 +60,12 @@ A hash of Pi's session ID supplies `x-opencode-session`, keeping
 routing affinity stable across turns and distinct between sessions. Auxiliary
 calls use the active Pi session when no explicit session ID is available.
 
-A bounded public-catalogue refresh intersects the currently listed IDs with
-Pi's known zero-cost models. Unknown models and paid models are not registered.
-Pi's model cache is used offline, with the bundled catalogue as the initial
-fallback. Update Pi for newly added model metadata. Free-model availability
+The model list merges three sources: Pi's built-in zero-cost models, a bundled
+seed of free models Pi's catalogue has not caught up with, and — for ids none of
+them knows — the `opencode` slice of models.dev, fetched at most once per six
+hours and only when Zen serves an unknown id. Paid models and models on a
+transport this provider does not register are never listed, and a failed
+external fetch still lets the known list refresh. Free-model availability
 and limits can change upstream; there is no automatic paid fallback.
 
 Requests use Pi's native retry handling (two retries by default) and a

@@ -8,8 +8,8 @@ import {
   type Api, type FetchFunction, type Model, type Provider, type StreamOptions,
 } from "@earendil-works/pi-ai";
 import { getApiProvider, registerApiProvider } from "@earendil-works/pi-ai/compat";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
 export const PROVIDER_ID = "opencode-zen-free";
@@ -54,6 +54,166 @@ export const STATIC_ZEN_HEADERS: Record<string, string> = {
   "x-opencode-client": OPENCODE_CLIENT,
   "x-opencode-project": OPENCODE_PROJECT,
 };
+
+/**
+ * External model metadata (cost, limits, modalities) for ids Pi's bundled
+ * catalogue does not know yet: the `opencode` slice of models.dev. Fetched only
+ * when Zen serves an id we cannot resolve locally, so an ordinary refresh costs
+ * no extra request.
+ */
+export const EXTERNAL_CATALOGUE_URL = "https://models.dev/api.json";
+
+/** One attempt at the external catalogue: the file is a few MB, so be patient but bounded. */
+const EXTERNAL_CATALOGUE_TIMEOUT_MS = 15_000;
+/** How long a fetched external catalogue stays usable inside one process. */
+const EXTERNAL_CATALOGUE_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Transport override for external ids that are not Chat Completions. Zen's Muse
+ * Spark models speak the Responses API; every other model we register uses Chat
+ * Completions, which is the default here.
+ */
+const EXTERNAL_API_OVERRIDES: Record<string, Api> = {
+  "muse-spark-1.2-contributor-free": "openai-responses",
+  "muse-spark-1.3-contributor-free": "openai-responses",
+};
+
+/** Chat Completions flags shared by every Zen completions model in Pi's catalogue. */
+const ZEN_COMPLETIONS_COMPAT = {
+  supportsStore: false,
+  supportsDeveloperRole: false,
+  supportsStrictMode: true,
+  maxTokensField: "max_tokens",
+} as const;
+
+/**
+ * Free models Zen already serves but Pi's bundled catalogue has not caught up
+ * with. Metadata mirrors Pi's own entries (pi-ai 1.1.0, catalogue generated
+ * 2026-10-07), so the list stays complete without a Pi update and works offline.
+ * `jev-1.13-free` is a classifier in Pi's catalogue: its `typesafe-system-one`
+ * API is not registered here, so it is registered on Chat Completions to keep
+ * the list complete, and may still fail when called.
+ * `inputLimits` exists in Pi >= 0.87 only; the pinned 0.86.1 `Model` type has no
+ * such field, hence the intersection here - the metadata still reaches the
+ * runtime catalogue.
+ */
+export const SEEDED_FREE_MODELS: (Model<Api> & { inputLimits?: unknown })[] = [
+  { id: "exo-free", name: "Exo Free", api: "openai-completions", provider: PROVIDER_ID, baseUrl: BASE_URL, reasoning: true, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: ZEN_COMPLETIONS_COMPAT, contextWindow: 1048576, maxTokens: 131072, thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null }, inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4718592, jpegQuality: 80 } } } },
+  { id: "fledge-alpha-free", name: "Fledge Alpha Free", api: "openai-completions", provider: PROVIDER_ID, baseUrl: BASE_URL, reasoning: true, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: ZEN_COMPLETIONS_COMPAT, contextWindow: 1048576, maxTokens: 131072, thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" }, inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4718592, jpegQuality: 80 } } } },
+  { id: "ling-3.1-flash-free", name: "Ling 3.1 Flash Free", api: "openai-completions", provider: PROVIDER_ID, baseUrl: BASE_URL, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: ZEN_COMPLETIONS_COMPAT, contextWindow: 262144, maxTokens: 32768 },
+  { id: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", api: "openai-completions", provider: PROVIDER_ID, baseUrl: BASE_URL, reasoning: true, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: ZEN_COMPLETIONS_COMPAT, contextWindow: 1000000, maxTokens: 131072, inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4718592, jpegQuality: 80 } } } },
+  { id: "space-bunny-free", name: "Space Bunny Free", api: "openai-completions", provider: PROVIDER_ID, baseUrl: BASE_URL, reasoning: true, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: ZEN_COMPLETIONS_COMPAT, contextWindow: 1048576, maxTokens: 524288, thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" }, inputLimits: { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4718592, jpegQuality: 80 } } } },
+  { id: "jev-1.13-free", name: "Jev 1.13 Free", api: "openai-completions", provider: PROVIDER_ID, baseUrl: BASE_URL, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 32000 },
+];
+
+/** Dedupe by id (first wins) and stamp the static Zen identity headers on every model. */
+export function mergeById(lists: Model<Api>[][]): Model<Api>[] {
+  const seen = new Set<string>();
+  const merged: Model<Api>[] = [];
+  for (const list of lists) {
+    for (const model of list) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      merged.push({ ...model, headers: { ...model.headers, ...STATIC_ZEN_HEADERS } });
+    }
+  }
+  return merged;
+}
+
+/** Pi's bundled free models plus the bundled seed: everything known without a network call. */
+export function knownModels(): Model<Api>[] {
+  return mergeById([freeModels(), SEEDED_FREE_MODELS]);
+}
+
+function externalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Zero-cost models from an external catalogue body (models.dev shape:
+ * `{ <provider>: { models: { <id>: { cost, limit, modalities, ... } } } }`).
+ * Paid models, models without a usable context window, and models whose API we
+ * do not register are skipped, so a changed remote shape can only shrink the
+ * list, never break it.
+ */
+export function externalFreeModels(body: unknown): Model<Api>[] {
+  if (!body || typeof body !== "object") return [];
+  const slice = (body as Record<string, unknown>)["opencode"];
+  if (!slice || typeof slice !== "object") return [];
+  const catalogue = (slice as Record<string, unknown>)["models"];
+  if (!catalogue || typeof catalogue !== "object") return [];
+  const models: Model<Api>[] = [];
+  for (const [id, raw] of Object.entries(catalogue as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object") continue;
+    const record = raw as { name?: unknown; reasoning?: unknown; cost?: unknown; limit?: unknown; modalities?: unknown };
+    if (!record.cost || typeof record.cost !== "object") continue;
+    const cost = record.cost as Record<string, unknown>;
+    const rates = {
+      input: externalNumber(cost["input"]) ?? 0,
+      output: externalNumber(cost["output"]) ?? 0,
+      cacheRead: externalNumber(cost["cache_read"]) ?? 0,
+      cacheWrite: externalNumber(cost["cache_write"]) ?? 0,
+    };
+    if (Object.values(rates).some((rate) => rate !== 0)) continue;
+    const api: Api = EXTERNAL_API_OVERRIDES[id] ?? "openai-completions";
+    if (!SUPPORTED_APIS.has(api)) continue;
+    const limit = record.limit && typeof record.limit === "object" ? record.limit as Record<string, unknown> : {};
+    const contextWindow = externalNumber(limit["context"]);
+    if (!contextWindow || contextWindow <= 0) continue;
+    const modalities = record.modalities && typeof record.modalities === "object"
+      ? (record.modalities as Record<string, unknown>)["input"]
+      : undefined;
+    const input: Model<Api>["input"] = ["text"];
+    if (Array.isArray(modalities) && modalities.includes("image")) input.push("image");
+    models.push({
+      id,
+      name: typeof record.name === "string" && record.name ? record.name : id,
+      api,
+      provider: PROVIDER_ID,
+      baseUrl: BASE_URL,
+      reasoning: record.reasoning === true,
+      input,
+      cost: rates,
+      contextWindow,
+      maxTokens: externalNumber(limit["output"]) ?? Math.max(1, Math.floor(contextWindow / 4)),
+      compat: api === "openai-completions" ? ZEN_COMPLETIONS_COMPAT : { sessionAffinityFormat: "openai-nosession" },
+    });
+  }
+  return models;
+}
+
+type ExternalCatalogueCache = { checkedAt: number; models: Model<Api>[]; checked: Set<string> };
+let externalCatalogueCache: ExternalCatalogueCache | undefined;
+
+/** Drop the cached external catalogue (tests). */
+export function resetExternalCatalogueCache(): void {
+  externalCatalogueCache = undefined;
+}
+
+/**
+ * External metadata for ids we cannot resolve locally. Fetched at most once per
+ * TTL and skipped when every unknown id was already looked up in this window: a
+ * model the external catalogue does not know cannot become known by asking
+ * again.
+ */
+async function externalFreeModelsFor(ids: readonly string[], signal: AbortSignal): Promise<Model<Api>[]> {
+  const cached = externalCatalogueCache;
+  const fresh = cached !== undefined && Date.now() - cached.checkedAt < EXTERNAL_CATALOGUE_TTL_MS;
+  if (cached && fresh && ids.every((id) => cached.checked.has(id))) return cached.models;
+  const response = await fetch(EXTERNAL_CATALOGUE_URL, {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(EXTERNAL_CATALOGUE_TIMEOUT_MS)]),
+    headers: { "User-Agent": "pi-opencode-direct/0.1.7" },
+  });
+  if (!response.ok) throw new Error(`External model catalogue: HTTP ${response.status}`);
+  const body = await response.json();
+  const models = externalFreeModels(body);
+  externalCatalogueCache = {
+    checkedAt: Date.now(),
+    models,
+    checked: new Set([...(cached && fresh ? cached.checked : []), ...ids]),
+  };
+  return models;
+}
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 function base62FromBytes(bytes: Uint8Array, length: number): string {
@@ -609,7 +769,7 @@ export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefine
 /** Reuse Pi's native serializers, streaming parsers, reasoning, and tool handling. */
 export function zenProvider(getSessionId: () => string | undefined = () => undefined): Provider {
   const fallbackSession = randomUUID();
-  const baseline = freeModels();
+  const baseline = knownModels();
   let catalogue = baseline;
   const provider = createProvider({
     id: PROVIDER_ID,
@@ -664,9 +824,10 @@ export function zenProvider(getSessionId: () => string | undefined = () => undef
     ...provider,
     getModels: () => catalogue,
     async refreshModels(ctx) {
-      const select = (ids: Set<unknown>) => baseline.filter((m) => ids.has(m.id));
       if (ctx.stored) {
-        const restored = select(new Set(ctx.stored.models.map((m) => m.id)));
+        const storedIds = new Set(ctx.stored.models.map((m) => m.id));
+        const restored = mergeById([baseline, [...ctx.stored.models]])
+          .filter((m) => storedIds.has(m.id));
         if (!await ctx.publish({ update: () => { catalogue = restored; } })) return;
       }
       if (!ctx.allowNetwork || ctx.signal.aborted) return;
@@ -679,7 +840,23 @@ export function zenProvider(getSessionId: () => string | undefined = () => undef
       const body = await response.json() as { data?: { id?: unknown }[] };
       if (!Array.isArray(body.data)) throw new Error("Invalid Zen model catalogue");
       const available = new Set(body.data.map((m) => m.id));
-      const next = select(available);
+      const resolved = new Set<string>([
+        ...baseline.map((m) => m.id),
+        ...(ctx.stored?.models ?? []).map((m) => m.id),
+      ]);
+      const unknown = body.data
+        .map((m) => m.id)
+        .filter((id): id is string => typeof id === "string" && !resolved.has(id));
+      let external: Model<Api>[] = [];
+      if (unknown.length > 0) {
+        try {
+          external = await externalFreeModelsFor(unknown, signal);
+        } catch {
+          external = []; // Best-effort: known models must still refresh.
+        }
+      }
+      const next = mergeById([baseline, [...ctx.stored?.models ?? []], external])
+        .filter((m) => available.has(m.id));
       await ctx.publish({
         persist: { models: next, checkedAt: Date.now() },
         update: () => { catalogue = next; },

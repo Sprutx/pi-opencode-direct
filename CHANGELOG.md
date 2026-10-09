@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8-local
+
+- Complete free-model list: a bundled seed covers the six free models Pi's built-in catalogue does not know yet (`exo-free`, `fledge-alpha-free`, `ling-3.1-flash-free`, `longcat-2.5-preview-free`, `space-bunny-free`, `jev-1.13-free`), with metadata mirroring pi-ai 1.1.0 (catalogue of 2026-10-07). The list is complete offline and no longer depends on the Pi version. `jev-1.13-free` is a classifier in Pi's catalogue registered on Chat Completions to keep the list complete; calls to it may still fail.
+- External metadata for ids nobody knows: when Zen serves an id that is in neither Pi's catalogue nor the seed, `refreshModels` reads the `opencode` slice of models.dev (six-hour cache, one fetch per batch of unknown ids, skipped entirely once every unknown id has been looked up). It is best-effort: a failed fetch never blocks refreshing the known models.
+- `refreshModels` registers as well as prunes now: candidates are Pi's catalogue, the seed, the stored list and the external result, then filtered by the live Zen list. Restoring from the store keeps the last live selection, with metadata refreshed from the current catalogue.
+- Import the api factories from `@earendil-works/pi-ai/compat` instead of the `/api/*` subpaths. Pi Web's extension loader resolves pi-ai aliases by prefix, so a subpath import rewrote to a non-existent path and the extension silently failed to load there; `/compat` has an explicit alias in every loader, so no host patch is needed any more.
+- New checks: `test/external.test.ts` covers the seed, the external parser, an unreachable external source and the cache; `test/live-models.ts` (opt-in) probes every registered model through the real provider path.
+
 ## 0.1.7
 
 - Pi 0.86.1 compatibility: adapt to the `TranscriptContext` Custom Streaming API. All `stream`/`streamSimple` paths (provider wrapper and compat side-channel patch) normalize legacy `Context` (`systemPrompt`/`tools`) to transcripts via `normalizeContext`, so direct calls keep working while Pi core sends transcripts. `swapCompactionPrompt` handles both shapes — legacy `systemPrompt` and transcript system messages read via `getCurrentSystemPrompt` (tools checked via `getCurrentTools`) — still limited to short standalone summarization prompts, user message and format untouched, keyed requests never rewritten. Debug shape summaries count transcript-declared tools.
