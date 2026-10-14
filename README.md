@@ -1,3 +1,22 @@
+
+# pi-opencode-direct
+
+Free OpenCode Zen models in Pi through native HTTP requests. No OpenCode
+installation, login, API key, server, container, or LiteLLM is required.
+
+## Install
+
+```sh
+pi install git:github.com/Sprutx/pi-opencode-direct@main
+```
+
+
+
+
+
+
+---
+## From Upstream:
 # pi-opencode-direct
 
 Free OpenCode Zen models in Pi through native HTTP requests. No OpenCode
